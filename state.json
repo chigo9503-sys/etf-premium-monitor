@@ -1,0 +1,18 @@
+{
+  "date": "",
+  "push_count": 0,
+  "targets": {
+    "sh513800": {
+      "discount_1": false,
+      "discount_2": false,
+      "premium_1": false,
+      "premium_2": false
+    },
+    "sz159866": {
+      "discount_1": false,
+      "discount_2": false,
+      "premium_1": false,
+      "premium_2": false
+    }
+  }
+}

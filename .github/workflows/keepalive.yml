@@ -1,0 +1,26 @@
+name: 保活（防止定时任务被停用）
+
+# GitHub 会自动停用连续 60 天没有仓库活动的 schedule 工作流。
+# 这个任务每月 1 号打一次卡，保证主监控不会被自动停用。
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 更新时间戳
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > keepalive.txt
+          git config user.name  "etf-monitor-bot"
+          git config user.email "etf-monitor-bot@users.noreply.github.com"
+          git add keepalive.txt
+          git commit -m "chore: 保活打卡 [skip ci]" || echo "无变化"
+          git push origin "HEAD:${GITHUB_REF_NAME}" || true

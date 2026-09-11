@@ -1,0 +1,57 @@
+name: ETF 折溢价监控
+
+on:
+  schedule:
+    # GitHub 的 cron 固定使用 UTC。
+    # 北京时间 09:00–15:59 = UTC 01:00–07:59，最小间隔 5 分钟。
+    # 脚本内部还会精确判断 9:30–11:30 / 13:00–15:00，并自动跳过休市日。
+    - cron: "*/5 1-7 * * 1-5"
+  workflow_dispatch: # 允许在 Actions 页面手动触发
+
+permissions:
+  contents: write # 回写 state.json 需要写权限
+
+concurrency:
+  group: etf-513800-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 运行监控
+        env:
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+        run: python etf_premium_monitor.py
+
+      - name: 回写状态文件
+        run: |
+          if [ -z "$(git status --porcelain state.json)" ]; then
+            echo "state.json 无变化，无需提交"
+            exit 0
+          fi
+          git config user.name  "etf-monitor-bot"
+          git config user.email "etf-monitor-bot@users.noreply.github.com"
+          git add state.json
+          git commit -m "chore: 更新折溢价监控状态 [skip ci]"
+          for i in 1 2 3; do
+            if git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
+               && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "状态已提交"
+              exit 0
+            fi
+            echo "提交失败，5 秒后重试（第 $i 次）"
+            sleep 5
+          done
+          echo "状态提交失败，但不影响监控本身" >&2
+          exit 0

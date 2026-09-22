@@ -1,19 +1,19 @@
 {
-  "date": "2026-09-21",
-  "push_count": 0,
+  "date": "2026-09-22",
+  "push_count": 2,
   "targets": {
     "sh513800": {
       "discount_1": false,
       "discount_2": false,
-      "premium_1": false,
+      "premium_1": true,
       "premium_2": false
     },
     "sz159866": {
       "discount_1": false,
       "discount_2": false,
-      "premium_1": false,
+      "premium_1": true,
       "premium_2": false
     }
   },
-  "updated": "2026-09-21 14:04:27"
+  "updated": "2026-09-22 13:58:45"
 }

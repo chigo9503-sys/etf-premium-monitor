@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-日股 ETF 折溢价监控 —— 多标的、多档位版
+折溢价 / 利率监控 —— 多标的、多档位版
 
-监控标的（每只独立配置档位）:
-  513800 日本东证指数ETF(南方)  档位 1.0% / 2.0%
-  159866 日经ETF(工银)          档位 3.0% / 5.0%
+监控标的（每只独立配置）:
+  513800 日本东证指数ETF(南方)   折溢价   档位 1.0% / 2.0%
+  159866 日经ETF(工银)           折溢价   档位 3.0% / 5.0%，每天最多推 1 条
+  GC001  国债逆回购(1天)         利率     档位 3.0% / 4.0%，每天最多推 2 条
 
 数据源 : 腾讯行情 http://qt.gtimg.cn/q=<code>   （沪市 sh，深市 sz）
-         字段 77 = 折溢价率(%), 78 = IOPV, 30 = 行情时间戳
+         字段 3  = 现价(股票/ETF) 或 当前年化利率%(逆回购)
+         字段 30 = 行情时间戳, 32 = 涨跌幅%
+         字段 77 = 折溢价率(%), 78 = IOPV   （仅股票/ETF，逆回购不读）
+
+两类标的:
+  kind="premium"  折溢价监控：溢价/折价分方向，各档每天只推一次
+  kind="rate"     利率监控：单向「越高越值得关注」，≥ 阈值即触发
 
 告警逻辑:
-  * 溢价(>0) / 折价(<0) 分方向，同一标的同一方向同一档位每天只推一次
+  * 同一标的同一档位每天只推一次
   * 回落有 0.5 个百分点的缓冲(滞后区间)，避免在阈值附近反复刷屏
   * 多个档位同时被突破时，优先推高档位
-  * 每日推送总数有硬上限（Server酱免费版每天 5 条），先到先得、高档优先
+  * 标的可用 daily_cap 单独限制每天推送条数（置位但不推送）
+  * 每日推送总数有硬上限（Server酱免费版每天 5 条）
 
 推送渠道 : Server酱（SendKey 走环境变量 SERVERCHAN_SENDKEY）
 
@@ -52,17 +60,27 @@ TARGETS = (
     {
         "code": "sh513800",
         "label": "513800 日本东证指数ETF(南方)",
+        "kind": "premium",             # 折溢价（双向）
         "levels": (1.0, 2.0),          # 第一档 1%，第二档 2%
     },
     {
         "code": "sz159866",
         "label": "159866 日经ETF(工银)",
+        "kind": "premium",
         "levels": (3.0, 5.0),          # 第一档 3%，第二档 5%
+        "daily_cap": 1,                # 该标的每天最多推 1 条（不分档）
+    },
+    {
+        "code": "sh204001",
+        "label": "GC001 国债逆回购(1天)",
+        "kind": "rate",                # 利率（单向：越高越值得关注）
+        "levels": (3.0, 4.0),          # 第一档 3%，第二档 4%
+        "daily_cap": 2,                # 该标的每天最多推 2 条
     },
 )
 
 HYSTERESIS = 0.5        # 回落缓冲(百分点)：已在档内时需跌回「阈值-缓冲」才复位
-MAX_PUSH_PER_DAY = 4    # 每日推送总条数上限（Server酱免费版每天 5 条，留 1 条余量）
+MAX_PUSH_PER_DAY = 5    # 每日推送总条数上限（Server酱免费版每天 5 条）
 
 MORNING = (dtime(9, 30), dtime(11, 30))
 AFTERNOON = (dtime(13, 0), dtime(15, 0))
@@ -74,8 +92,15 @@ def log(msg: str) -> None:
     print(f"[{datetime.now(TZ):%Y-%m-%d %H:%M:%S}] {msg}", flush=True)
 
 
-def level_keys(levels) -> tuple:
-    """某标的的全部档位标识，如 ('premium_1','premium_2','discount_1','discount_2')。"""
+def level_keys(target: dict) -> tuple:
+    """某标的的全部档位标识。
+
+    折溢价标的 : ('premium_1','discount_1','premium_2','discount_2')
+    利率标的   : ('high_1','high_2')
+    """
+    levels = target["levels"]
+    if target.get("kind") == "rate":
+        return tuple(f"high_{idx}" for idx in range(1, len(levels) + 1))
     return tuple(
         f"{side}_{idx}"
         for idx in range(1, len(levels) + 1)
@@ -84,16 +109,17 @@ def level_keys(levels) -> tuple:
 
 
 def in_trading_hours(now: datetime) -> bool:
-    """是否处于 A 股交易时段（北京时间，周一至周五）。"""
+    """是否处于 A 股交易时段（北京时间，周一至周五）。逆回购时段相同。"""
     if now.weekday() >= 5:
         return False
     t = now.time()
     return (MORNING[0] <= t <= MORNING[1]) or (AFTERNOON[0] <= t <= AFTERNOON[1])
 
 
-def fetch_quote(code: str, retries: int = 3, timeout: int = 10) -> dict:
-    """抓取腾讯行情并解析。code 形如 sh513800 / sz159866。"""
+def fetch_quote(code: str, kind: str = "premium", retries: int = 3, timeout: int = 10) -> dict:
+    """抓取腾讯行情并解析。code 形如 sh513800 / sz159866 / sh204001。"""
     url = f"http://qt.gtimg.cn/q={code}"
+    need = 80 if kind == "premium" else 33
     last_err: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
@@ -104,7 +130,7 @@ def fetch_quote(code: str, retries: int = 3, timeout: int = 10) -> dict:
             if '="' not in raw:
                 raise ValueError(f"响应格式异常: {raw[:80]!r}")
             parts = raw.split('="', 1)[1].split("~")
-            if len(parts) < 80:
+            if len(parts) < need:
                 raise ValueError(f"字段数不足({len(parts)})，代码可能有误")
             quote = {
                 "name": parts[1],
@@ -113,9 +139,13 @@ def fetch_quote(code: str, retries: int = 3, timeout: int = 10) -> dict:
                 "prev_close": float(parts[4]),
                 "change_pct": float(parts[32]),
                 "quote_time": parts[30],
-                "premium": float(parts[77]),
-                "iopv": float(parts[78]),
             }
+            if kind == "rate":
+                # 逆回购的「价格」即当前年化利率(%)
+                quote["rate"] = float(parts[3])
+            else:
+                quote["premium"] = float(parts[77])
+                quote["iopv"] = float(parts[78])
             if quote["price"] <= 0:
                 raise ValueError("现价为 0，行情未有效刷新")
             return quote
@@ -126,15 +156,35 @@ def fetch_quote(code: str, retries: int = 3, timeout: int = 10) -> dict:
     raise RuntimeError(f"获取行情失败(retries={retries}): {last_err}")
 
 
-def compute_levels(premium: float, prev_active: dict, levels) -> set:
+def core_value(target: dict, quote: dict) -> float:
+    """取用于与阈值比较的数值。"""
+    if target.get("kind") == "rate":
+        return quote["rate"]
+    return quote["premium"]
+
+
+def compute_levels(target: dict, value: float, prev_active: dict) -> set:
     """算出当前应处于激活状态的档位集合。
 
     进入档位用阈值本身，退出档位用 阈值-缓冲，构成滞后区间，防止阈值附近抖动刷屏。
     """
-    magnitude = abs(premium)
-    side = "premium" if premium >= 0 else "discount"
+    levels = target["levels"]
     active: set = set()
 
+    if target.get("kind") == "rate":
+        # 利率标的：单向，值越大越「高」
+        for idx, threshold in enumerate(levels, start=1):
+            key = f"high_{idx}"
+            was_on = bool(prev_active.get(key, False))
+            if was_on:
+                if value >= threshold - HYSTERESIS:
+                    active.add(key)
+            elif value >= threshold:
+                active.add(key)
+        return active
+
+    magnitude = abs(value)
+    side = "premium" if value >= 0 else "discount"
     for idx, threshold in enumerate(levels, start=1):
         key = f"{side}_{idx}"
         was_on = bool(prev_active.get(key, False))
@@ -219,11 +269,25 @@ def push(sendkey: str, title: str, desp: str) -> bool:
 
 
 def alert_text(target: dict, key: str, quote: dict) -> tuple:
-    side, idx = key.split("_")
-    idx = int(idx)
+    idx = int(key.split("_")[1])
     threshold = target["levels"][idx - 1]
-    word = "溢价" if side == "premium" else "折价"
     mark = "🚨 第二档" if idx >= 2 else "⚠️ 第一档"
+
+    if target.get("kind") == "rate":
+        title = f"{mark}｜{target['label']} 利率 {threshold:g}%"
+        desp = (
+            f"**{target['label']}**（{quote['name']}）\n\n"
+            f"- 当前利率：**{quote['rate']:.3f}%**  → 触发 ≥{threshold:.0f}% 档\n"
+            f"- 昨收利率：{quote['prev_close']:.3f}%\n"
+            f"- 当日变动：{quote['change_pct']:+.2f}%\n"
+            f"- 行情时间：{fmt_time(quote['quote_time'])}\n\n"
+            f"> 告警规则：利率单向监控，同一档位每天只推一次；"
+            f"回落 {HYSTERESIS} 个百分点后复位，再次突破会重新提醒。"
+        )
+        return title, desp
+
+    side = key.split("_")[0]
+    word = "溢价" if side == "premium" else "折价"
     sign = "+" if quote["premium"] >= 0 else ""
 
     title = f"{mark}｜{target['label']} {word} {threshold:g}%"
@@ -255,7 +319,7 @@ def write_summary(lines: list) -> None:
 
 
 def main(argv: list | None = None) -> int:
-    parser = argparse.ArgumentParser(description="日股 ETF 折溢价监控（多标的多档位）")
+    parser = argparse.ArgumentParser(description="折溢价 / 利率监控（多标的多档位）")
     parser.add_argument("--force", action="store_true", help="忽略交易时段/休市判断")
     parser.add_argument("--dry-run", action="store_true", help="不推送，仅打印")
     parser.add_argument(
@@ -270,7 +334,7 @@ def main(argv: list | None = None) -> int:
     today = now.strftime("%Y-%m-%d")
     today_stamp = now.strftime("%Y%m%d")
 
-    summary = [f"### 折溢价检查 — {now:%Y-%m-%d %H:%M:%S} (UTC+8)", ""]
+    summary = [f"### 监控检查 — {now:%Y-%m-%d %H:%M:%S} (UTC+8)", ""]
 
     # 1. 交易时段
     if not args.force and not in_trading_hours(now):
@@ -283,7 +347,7 @@ def main(argv: list | None = None) -> int:
     state = load_state(state_path)
     if state.get("date") != today:
         log(f"新交易日 {today}，重置全部档位状态")
-        state = {"date": today, "push_count": 0, "targets": {}}
+        state = {"date": today, "push_count": 0, "pushed_by_target": {}, "targets": {}}
     saved_targets = dict(state.get("targets") or {})
 
     # 3. 逐标的取行情、算档位
@@ -291,12 +355,13 @@ def main(argv: list | None = None) -> int:
     final_active = {}  # 标的 -> 本次结束后应处于激活状态的档位集合
     ok_count = 0
 
-    for target in TARGETS:
+    for order, target in enumerate(TARGETS):
         code, label = target["code"], target["label"]
-        keys = level_keys(target["levels"])
+        kind = target.get("kind", "premium")
+        keys = level_keys(target)
 
         try:
-            quote = fetch_quote(code)
+            quote = fetch_quote(code, kind)
         except Exception as exc:  # noqa: BLE001
             log(f"{label} 行情获取失败：{exc}")
             summary.append(f"- ❌ `{label}` 行情获取失败：`{exc}`")
@@ -308,22 +373,32 @@ def main(argv: list | None = None) -> int:
             continue
 
         ok_count += 1
-        premium = quote["premium"]
+        value = core_value(target, quote)
         prev = dict(saved_targets.get(code) or {})
         prev_on = {k for k in keys if prev.get(k)}
-        current = compute_levels(premium, prev, target["levels"])
+        current = compute_levels(target, value, prev)
         final_active[code] = set(current)
         newly = sorted(current - prev_on)
 
-        log(
-            f"{label} 现价{quote['price']:.3f} IOPV{quote['iopv']:.4f} "
-            f"折溢价{premium:+.2f}% 涨跌{quote['change_pct']:+.2f}% "
-            f"｜激活{sorted(current) or '无'}｜新触发{newly or '无'}"
-        )
-        summary.append(
-            f"- `{label}`：现价 `{quote['price']:.3f}`｜IOPV `{quote['iopv']:.4f}`｜"
-            f"**折溢价 `{premium:+.2f}%`**｜激活 `{', '.join(sorted(current)) or '无'}`"
-        )
+        if kind == "rate":
+            log(
+                f"{label} 利率{value:.3f}% 涨跌{quote['change_pct']:+.2f}% "
+                f"｜激活{sorted(current) or '无'}｜新触发{newly or '无'}"
+            )
+            summary.append(
+                f"- `{label}`：**利率 `{value:.3f}%`**｜"
+                f"激活 `{', '.join(sorted(current)) or '无'}`"
+            )
+        else:
+            log(
+                f"{label} 现价{quote['price']:.3f} IOPV{quote['iopv']:.4f} "
+                f"折溢价{value:+.2f}% 涨跌{quote['change_pct']:+.2f}% "
+                f"｜激活{sorted(current) or '无'}｜新触发{newly or '无'}"
+            )
+            summary.append(
+                f"- `{label}`：现价 `{quote['price']:.3f}`｜IOPV `{quote['iopv']:.4f}`｜"
+                f"**折溢价 `{value:+.2f}%`**｜激活 `{', '.join(sorted(current)) or '无'}`"
+            )
 
         for key in newly:
             pending.append(
@@ -332,6 +407,7 @@ def main(argv: list | None = None) -> int:
                     "quote": quote,
                     "key": key,
                     "level": int(key.split("_")[1]),
+                    "order": order,
                 }
             )
         time.sleep(0.5)  # 多标的时稍微错开请求
@@ -341,22 +417,33 @@ def main(argv: list | None = None) -> int:
         write_summary(summary)
         return 0
 
-    # 4. 推送：高档位优先，受每日总上限约束
-    pending.sort(key=lambda item: -item["level"])
+    # 4. 推送：高档位优先 → 标的级 daily_cap → 每日总上限
+    pending.sort(key=lambda item: (-item["level"], item["order"]))
     sendkey = read_sendkey()
     push_count = int(state.get("push_count") or 0)
+    pushed_by_target = dict(state.get("pushed_by_target") or {})
     pushed = []
+    capped = []
 
-    for pos, item in enumerate(pending):
-        label, key = item["target"]["label"], item["key"]
+    for item in pending:
+        target = item["target"]
+        code, label, key = target["code"], target["label"], item["key"]
+        cap = target.get("daily_cap")
+
+        if cap is not None and pushed_by_target.get(code, 0) >= cap:
+            log(f"{label} 已达当日上限 {cap} 条，本次不推（档位仍置位）")
+            capped.append(f"{label} {key}")
+            continue
         if push_count >= MAX_PUSH_PER_DAY:
             log(f"已达每日推送上限 {MAX_PUSH_PER_DAY} 条，跳过 {label} {key}")
             continue
-        title, desp = alert_text(item["target"], key, item["quote"])
+
+        title, desp = alert_text(target, key, item["quote"])
         if args.dry_run:
             log(f"[DRY-RUN] 拟推送: {title}")
             pushed.append(f"{label} {key}")
             push_count += 1
+            pushed_by_target[code] = pushed_by_target.get(code, 0) + 1
             continue
         if not sendkey:
             log("缺少 SendKey（环境变量 SERVERCHAN_SENDKEY 或 config.json），无法推送")
@@ -365,16 +452,17 @@ def main(argv: list | None = None) -> int:
             log(f"已推送: {title}")
             pushed.append(f"{label} {key}")
             push_count += 1
+            pushed_by_target[code] = pushed_by_target.get(code, 0) + 1
             time.sleep(1)
         else:
             # 推送失败不标记为已激活，下次继续尝试
             log(f"推送失败，{label} {key} 保留待下次重试")
-            final_active[item["target"]["code"]].discard(key)
+            final_active[code].discard(key)
 
     # 5. 落盘
     new_targets = dict(saved_targets)
     for target in TARGETS:
-        code, keys = target["code"], level_keys(target["levels"])
+        code, keys = target["code"], level_keys(target)
         if code in final_active:
             new_targets[code] = {k: (k in final_active[code]) for k in keys}
         else:
@@ -382,6 +470,7 @@ def main(argv: list | None = None) -> int:
     state["date"] = today
     state["targets"] = new_targets
     state["push_count"] = push_count
+    state["pushed_by_target"] = pushed_by_target
     state["updated"] = now.strftime("%Y-%m-%d %H:%M:%S")
     changed = save_state(state_path, state)
 
@@ -389,6 +478,8 @@ def main(argv: list | None = None) -> int:
     summary.append(
         f"- 本次推送：`{'; '.join(pushed) or '无'}`｜今日累计 `{push_count}/{MAX_PUSH_PER_DAY}` 条"
     )
+    if capped:
+        summary.append(f"- 因标的每日上限跳过：`{'; '.join(capped)}`")
     summary.append(f"- 状态文件{'已更新' if changed else '无变化'}")
     if args.dry_run:
         summary.append("- （dry-run 模式，未真实发送）")

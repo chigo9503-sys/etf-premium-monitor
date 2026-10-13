@@ -1,10 +1,7 @@
 {
-  "date": "2026-10-12",
-  "push_count": 2,
-  "pushed_by_target": {
-    "sh513800": 1,
-    "sz159866": 1
-  },
+  "date": "2026-10-13",
+  "push_count": 0,
+  "pushed_by_target": {},
   "targets": {
     "sh204001": {
       "high_1": false,
@@ -13,7 +10,7 @@
     "sh513800": {
       "discount_1": false,
       "discount_2": false,
-      "premium_1": true,
+      "premium_1": false,
       "premium_2": false
     },
     "sz159866": {
@@ -23,5 +20,5 @@
       "premium_2": false
     }
   },
-  "updated": "2026-10-12 14:55:22"
+  "updated": "2026-10-13 09:30:36"
 }

@@ -18,9 +18,9 @@
     "sz159866": {
       "discount_1": false,
       "discount_2": false,
-      "premium_1": false,
+      "premium_1": true,
       "premium_2": false
     }
   },
-  "updated": "2026-11-04 13:15:25"
+  "updated": "2026-11-04 13:20:27"
 }

@@ -10,7 +10,7 @@
       "high_2": false
     },
     "sh513800": {
-      "discount_1": true,
+      "discount_1": false,
       "discount_2": false,
       "premium_1": false,
       "premium_2": false
@@ -22,5 +22,5 @@
       "premium_2": false
     }
   },
-  "updated": "2026-11-23 13:40:28"
+  "updated": "2026-11-23 13:45:26"
 }
